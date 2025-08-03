@@ -1,0 +1,208 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 필수 권한만 유지 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    
+    <!-- 화면 깨우기를 위한 권한 -->
+    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+    <uses-permission android:name="android.permission.TURN_SCREEN_ON" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+    
+    <!-- 충전 상태 감지를 위한 권한 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    
+    <!-- 잠금 상태 백그라운드 실행을 위한 추가 권한 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.DEVICE_POWER" />
+    <uses-permission android:name="android.permission.IGNORE_BATTERY_OPTIMIZATIONS" />
+    
+    <!-- MIUI 특별 권한들 -->
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS" />
+   
+   <!-- 로그 파일 저장을 위한 권한 -->
+   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" 
+       android:maxSdkVersion="28" />
+   <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    
+    <!-- 앱 실행을 위한 권한 - 타겟 쿼리 방식으로 변경 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    
+    <!-- 화면 제어를 위한 추가 권한 -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <uses-permission android:name="android.permission.CHANGE_CONFIGURATION" />
+    
+    <!-- 디바이스 관리자 권한 -->
+    <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
+    
+    <!-- 접근성 서비스 권한 -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
+    
+    <application
+        android:label="AutoLaunch"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize"
+            android:turnScreenOn="true"
+            android:showWhenLocked="true">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+            
+        <!-- BroadcastReceiver for power events -->
+        <receiver
+            android:name=".PowerConnectionReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true"
+            android:stopWithTask="false">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
+                <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <data android:scheme="package" />
+            </intent-filter>
+            <!-- Doze Mode 우회를 위한 추가 인텐트 필터 -->
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.SCREEN_ON" />
+                <action android:name="android.intent.action.SCREEN_OFF" />
+                <action android:name="android.intent.action.USER_PRESENT" />
+                <action android:name="android.intent.action.BATTERY_CHANGED" />
+            </intent-filter>
+        </receiver>
+        
+        <!-- MIUI 백그라운드 제한 우회용 AlarmManager 기반 Receiver -->
+        <receiver
+            android:name=".MIUIBatteryCheckReceiver"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true"
+            android:stopWithTask="false">
+        </receiver>
+        
+        <!-- Background Service for AutoLaunch -->
+        <service
+            android:name=".AutoLaunchService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false">
+        </service>
+        
+        <!-- Background Job Service for persistent monitoring -->
+        <service
+            android:name=".BackgroundJobService"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false">
+        </service>
+        
+        <!-- Wake Up Activity for screen activation -->
+        <activity
+            android:name=".WakeUpActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:launchMode="singleTask"
+            android:turnScreenOn="true"
+            android:showWhenLocked="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true">
+        </activity>
+        
+        <!-- Screen Off Activity for screen deactivation -->
+        <activity
+            android:name=".ScreenOffActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:noHistory="true">
+        </activity>
+        
+        <!-- Device Admin Receiver for screen control -->
+        <receiver
+            android:name=".DeviceAdminReceiver"
+            android:exported="true"
+            android:enabled="true"
+            android:label="AutoLaunch 디바이스 관리자"
+            android:description="@string/device_admin_description"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter android:priority="1000">
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLED" />
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLE_REQUESTED" />
+            </intent-filter>
+        </receiver>
+        
+        <!-- Accessibility Service for advanced screen control -->
+        <service
+            android:name=".AutoLaunchAccessibilityService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service" />
+        </service>
+        
+    </application>
+    
+    <!-- 타겟 쿼리 방식으로 특정 앱들만 조회 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+        
+        <!-- 네비게이션 앱들을 위한 타겟 쿼리 -->
+        <package android:name="com.skt.tmap.ku" />
+        <package android:name="com.kakao.navi" />
+        <package android:name="net.daum.android.map" />
+        <package android:name="com.nhn.android.nmap" />
+        <package android:name="com.google.android.apps.maps" />
+        <package android:name="com.waze" />
+    </queries>
+</manifest>
