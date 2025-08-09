@@ -279,22 +279,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(color: Colors.grey, fontSize: 14),
             ),
             const SizedBox(height: 16),
-
-            Slider(
-              value: controller.delayTime.toDouble(),
-              min: 1,
-              max: 10,
-              divisions: 9,
-              label: '${controller.delayTime}초',
-              onChanged: (value) {
-                controller.setDelayTime(value.toInt());
-              },
-            ),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: const [Text('1초'), Text('10초')],
-            ),
           ],
         ),
       ),
@@ -313,28 +297,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
-
-            // 블루투스 예외
-            SwitchListTile(
-              title: const Text('블루투스 예외'),
-              subtitle: const Text('특정 블루투스 연결 시에도 실행'),
-              value: false, // TODO: 구현 필요
-              onChanged: (value) {
-                controller.setBluetoothException(value);
-              },
-              secondary: const Icon(Icons.bluetooth),
-            ),
-
-            // 배터리 최적화 무시
-            SwitchListTile(
-              title: const Text('배터리 최적화 무시'),
-              subtitle: const Text('배터리 최적화 정책을 무시하고 실행'),
-              value: false, // TODO: 구현 필요
-              onChanged: (value) {
-                controller.setBatteryOptimization(value);
-              },
-              secondary: const Icon(Icons.battery_charging_full),
-            ),
           ],
         ),
       ),

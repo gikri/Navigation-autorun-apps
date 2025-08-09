@@ -77,20 +77,23 @@ class ScreenOffActivity : Activity() {
             window.attributes = layoutParams
             Log.d(TAG, "Screen brightness set to minimum")
             
-            // 3-2. 화면 플래그 설정
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            // 3-2. 화면 플래그 설정 (강화된 버전)
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
             
-            // 3-3. PowerManager를 통한 화면 끄기 시도
+            // 3-3. PowerManager를 통한 화면 끄기 시도 (강화된 버전)
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             
-            // WakeLock 방식
+            // 강화된 WakeLock 방식
             wakeLock = powerManager.newWakeLock(
-                PowerManager.SCREEN_DIM_WAKE_LOCK,
+                PowerManager.SCREEN_DIM_WAKE_LOCK or
+                PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
                 "AutoLaunch::ScreenOffLock"
             )
             
             // 매우 짧은 시간 동안 WakeLock을 획득했다가 해제
-            wakeLock?.acquire(100)
+            wakeLock?.acquire(200)
             
             Handler(Looper.getMainLooper()).postDelayed({
                 wakeLock?.let {
@@ -99,13 +102,24 @@ class ScreenOffActivity : Activity() {
                         Log.d(TAG, "WakeLock released for screen off")
                     }
                 }
-            }, 50)
+            }, 100)
             
-            // 3-4. 시스템 화면 끄기 브로드캐스트 시도
+            // 3-4. 시스템 화면 끄기 브로드캐스트 시도 (강화된 버전)
             try {
                 val screenOffIntent = Intent(Intent.ACTION_SCREEN_OFF)
                 sendBroadcast(screenOffIntent)
                 Log.d(TAG, "Screen off broadcast sent")
+                
+                // 추가 브로드캐스트 시도
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        val additionalScreenOffIntent = Intent(Intent.ACTION_SCREEN_OFF)
+                        sendBroadcast(additionalScreenOffIntent)
+                        Log.d(TAG, "Additional screen off broadcast sent")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Additional screen off broadcast failed", e)
+                    }
+                }, 500)
             } catch (e: Exception) {
                 Log.w(TAG, "Screen off broadcast failed", e)
             }
@@ -119,6 +133,29 @@ class ScreenOffActivity : Activity() {
             } catch (e: Exception) {
                 Log.w(TAG, "Screen saver activation failed", e)
             }
+            
+            // 3-6. 추가 화면 끄기 시도 (새로운 방법)
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    // 화면이 여전히 켜져있다면 추가 시도
+                    if (powerManager.isInteractive) {
+                        Log.d(TAG, "Screen still on, trying additional methods")
+                        
+                        // 추가 WakeLock 시도
+                        val additionalWakeLock = powerManager.newWakeLock(
+                            PowerManager.SCREEN_DIM_WAKE_LOCK,
+                            "AutoLaunch::AdditionalScreenOffLock"
+                        )
+                        additionalWakeLock.acquire(100)
+                        
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            additionalWakeLock.release()
+                        }, 50)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in additional screen off attempt", e)
+                }
+            }, 1000)
             
         } catch (e: Exception) {
             Log.e(TAG, "Error turning off screen", e)

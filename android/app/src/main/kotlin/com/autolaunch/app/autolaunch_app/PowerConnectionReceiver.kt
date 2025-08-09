@@ -3,6 +3,7 @@ package com.autolaunch.app.autolaunch_app
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.util.Log
 import android.content.ComponentName
 import android.content.pm.PackageManager
@@ -24,25 +25,51 @@ class PowerConnectionReceiver : BroadcastReceiver() {
     }
     
     override fun onReceive(context: Context, intent: Intent) {
-        Log.d(TAG, "🔥 MIUI PowerConnectionReceiver triggered: ${intent.action}")
+        Log.d(TAG, "🔥🔥🔥 PowerConnectionReceiver triggered: ${intent.action} 🔥🔥🔥")
         
-        // MIUI 대응: 서비스 강제 재시작으로 백그라운드 실행 보장
-        AutoLaunchService.startService(context)
-        
-        // MIUI 대응: AlarmManager 기반 체크도 재시작
-        restartMIUIBatteryCheck(context)
+        // 서비스 강제 재시작/알람 재예약은 MIUI에서만 사용
+        if (SystemUtils.isMiui()) {
+            AutoLaunchService.startService(context)
+            restartMIUIBatteryCheck(context)
+            Handler(Looper.getMainLooper()).postDelayed({
+                AutoLaunchService.startService(context)
+                restartMIUIBatteryCheck(context)
+            }, 1000)
+        }
         
         // 설정 확인
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val serviceEnabled = prefs.getBoolean(KEY_SERVICE_ENABLED, true) // 기본값을 true로 변경
-        val targetApp = prefs.getString(KEY_TARGET_APP, null)
+        val merged = PreferencesBridge.readValues(context)
+        val serviceEnabled = merged.serviceEnabled
+        val targetApp = merged.targetApp
         
         Log.d(TAG, "Service enabled: $serviceEnabled, Target app: $targetApp")
+
+        // 서비스가 비활성화면 모든 처리 중단
+        if (!serviceEnabled) {
+            Log.w(TAG, "Service disabled - skipping power handling")
+            return
+        }
         
         when (intent.action) {
             Intent.ACTION_POWER_CONNECTED -> {
-                Log.d(TAG, "Power connected - launching app")
+                Log.d(TAG, "🔥🔥🔥 POWER CONNECTED DETECTED! 🔥🔥🔥")
                 if (serviceEnabled && targetApp != null) {
+                    // 새 연결 시작이면 시퀀스 증가 및 단 1회 처리
+                    val seq = ConnectionGuard.beginConnectionIfNew(context)
+                    if (seq == null) {
+                        Log.w(TAG, "Power already marked as charging. Skip duplicate connected event")
+                        return
+                    }
+                    if (!ConnectionGuard.shouldHandle(context, seq)) {
+                        Log.w(TAG, "Sequence already handled: $seq")
+                        return
+                    }
+                    ConnectionGuard.markHandled(context, seq)
+                    if (!LaunchGuard.canShow(context)) {
+                        Log.w(TAG, "Skip: Launch UI cooldown active or in progress")
+                        return
+                    }
+                    Log.d(TAG, "🔥 Starting power connected handling for: $targetApp")
                     handlePowerConnected(context, targetApp)
                 } else {
                     Log.d(TAG, "Service not enabled or target app not set")
@@ -52,8 +79,22 @@ class PowerConnectionReceiver : BroadcastReceiver() {
                 Log.d(TAG, "🔥🔥🔥 POWER DISCONNECTED DETECTED! 🔥🔥🔥")
                 Log.d(TAG, "Service enabled: $serviceEnabled, Target app: $targetApp")
                 if (serviceEnabled && targetApp != null) {
+                    // 연결 종료 마킹
+                    ConnectionGuard.endConnection(context)
                     Log.d(TAG, "🔥 Starting power disconnected handling for: $targetApp")
-                    handlePowerDisconnected(context, targetApp)
+                    // 해제시에도 5초 대기 UI 후 화면 잠금
+                    try {
+                        LaunchGuard.markStart(context)
+                        showShutdownStatus(context, targetApp)
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            try {
+                                ScreenOffActivity.startScreenOff(context)
+                            } catch (_: Exception) {}
+                        }, 5000)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error handling disconnect UI/lock", e)
+                        handlePowerDisconnected(context, targetApp)
+                    }
                 } else {
                     Log.w(TAG, "⚠️ Service not enabled or target app not set - skipping power disconnect handling")
                 }
@@ -71,9 +112,11 @@ class PowerConnectionReceiver : BroadcastReceiver() {
                 AutoLaunchService.startService(context)
             }
             Intent.ACTION_SCREEN_ON -> {
-                Log.d(TAG, "Screen turned on - checking power status")
-                // 화면이 켜질 때 충전 상태를 다시 체크
-                checkPowerStatusOnScreenOn(context)
+                Log.d(TAG, "Screen turned on")
+                // 비-MIUI에서는 화면 켜짐시 추가 체크를 하지 않아 루프 방지
+                if (SystemUtils.isMiui()) {
+                    checkPowerStatusOnScreenOn(context)
+                }
             }
             Intent.ACTION_SCREEN_OFF -> {
                 Log.d(TAG, "Screen turned off - ensuring service is running")
@@ -81,9 +124,10 @@ class PowerConnectionReceiver : BroadcastReceiver() {
                 AutoLaunchService.startService(context)
             }
             Intent.ACTION_USER_PRESENT -> {
-                Log.d(TAG, "User present - checking power status")
-                // 사용자가 잠금 해제 시 충전 상태 체크
-                checkPowerStatusOnScreenOn(context)
+                Log.d(TAG, "User present")
+                if (SystemUtils.isMiui()) {
+                    checkPowerStatusOnScreenOn(context)
+                }
             }
             Intent.ACTION_BATTERY_CHANGED -> {
                 // 배터리 상태 변화시 충전 연결/해제 감지
@@ -94,24 +138,66 @@ class PowerConnectionReceiver : BroadcastReceiver() {
     
     private fun handlePowerConnected(context: Context, targetApp: String) {
         try {
-            // 1. 고우선순위 알림으로 화면 깨우기 시도
-            AutoLaunchService.showWakeUpNotification(context, targetApp)
-            
-            // 2. 딜레이 후 WakeUpActivity를 통해 화면 깨우기 및 앱 실행
-            Handler(Looper.getMainLooper()).postDelayed({
-                val intent = Intent(context, WakeUpActivity::class.java)
-                intent.putExtra(WakeUpActivity.EXTRA_TARGET_APP, targetApp)
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                context.startActivity(intent)
-                
-                Log.d(TAG, "WakeUpActivity started for app: $targetApp")
-            }, 500)
-            
+            Log.d(TAG, "🔥🔥🔥 POWER CONNECTED - Show waiting UI immediately, launch after 5s: $targetApp 🔥🔥🔥")
+
+            // 즉시 대기 UI 표시 (5초 카운트다운)
+            LaunchGuard.markStart(context)
+            showLaunchStatus(context, targetApp, delaySeconds = 5)
+
+            // 보조: 풀스크린 알림도 함께(디바이스별 정책 대비)
+            try {
+                AutoLaunchService.showWakeUpNotification(context, targetApp)
+            } catch (_: Exception) {}
+
         } catch (e: Exception) {
             Log.e(TAG, "Error handling power connected", e)
-            // 대안으로 기존 방식 시도
-            launchApp(context, targetApp)
+        }
+    }
+    
+    private fun showLaunchStatus(context: Context, targetApp: String, delaySeconds: Int = 0) {
+        try {
+            Log.d(TAG, "🔥🔥🔥 즉시 StatusActivity 실행 🔥🔥🔥")
+            val statusIntent = Intent(context, StatusActivity::class.java).apply {
+                putExtra(StatusActivity.EXTRA_STATUS_TYPE, "launch")
+                putExtra(StatusActivity.EXTRA_TARGET_APP, targetApp)
+                // 요청된 지연(초) 동안 UI를 보여준 뒤 실행
+                putExtra(StatusActivity.EXTRA_DELAY_SECONDS, delaySeconds)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+            }
+            context.startActivity(statusIntent)
+            Log.d(TAG, "🔥 StatusActivity launched immediately")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing launch status", e)
+        }
+    }
+    
+    private fun showShutdownStatus(context: Context, targetApp: String) {
+        try {
+            val statusIntent = Intent(context, StatusActivity::class.java).apply {
+                putExtra(StatusActivity.EXTRA_STATUS_TYPE, "shutdown")
+                putExtra(StatusActivity.EXTRA_TARGET_APP, targetApp)
+                putExtra(StatusActivity.EXTRA_DELAY_SECONDS, 5)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            context.startActivity(statusIntent)
+            Log.d(TAG, "🔥 Shutdown status activity started")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing shutdown status", e)
+        }
+    }
+    
+    private fun executeWakeUpSequence(context: Context, targetApp: String) {
+        try {
+            Log.d(TAG, "🔥🔥🔥 EXECUTING WAKE UP SEQUENCE for: $targetApp 🔥🔥🔥")
+            
+            // StatusActivity에서 3초 딜레이 후 앱 실행하므로 여기서는 추가 실행하지 않음
+            Log.d(TAG, "🔥 StatusActivity will handle app launch after 3 seconds")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in wake up sequence", e)
         }
     }
     
@@ -120,70 +206,88 @@ class PowerConnectionReceiver : BroadcastReceiver() {
             Log.d(TAG, "🔥 POWER DISCONNECTED - Starting comprehensive app close and screen off sequence")
             LogManager.getInstance().logAndSave(context, TAG, "🔥 POWER DISCONNECTED - Starting comprehensive sequence for: $targetApp")
             
-            // 🔥 방식 1: 즉시 강력한 앱 종료 시스템 사용
-            Log.d(TAG, "🔥 Step 1: Using AppKiller for comprehensive app termination")
-            LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 1: AppKiller start for: $targetApp")
+            // StatusActivity로 종료 상태 표시
+            showShutdownStatus(context, targetApp)
             
-            AppKiller.killApp(context, targetApp) { killResult ->
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 AppKiller result: $killResult for: $targetApp")
-            }
-            
-            // 🔥 방식 2: 100ms 후 기존 방식도 병행
+            // 3초 딜레이 후 화면 끄기 및 앱 종료 시작
             Handler(Looper.getMainLooper()).postDelayed({
-                Log.d(TAG, "🔥 Step 2: Backup force close attempt")
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 2: Backup force close")
-                forceCloseTargetApp(context, targetApp)
-                forceCloseTargetAppAlternative(context, targetApp)
-            }, 100)
-            
-            // 🔥 방식 3: 200ms 후 홈 화면 강제 이동
-            Handler(Looper.getMainLooper()).postDelayed({
-                Log.d(TAG, "🔥 Step 3: Force move to home screen")
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 3: Force to home")
-                forceToHomeScreen(context)
-            }, 200)
-            
-            // 🔥 방식 4: 500ms 후 화면 끄기 시도 1차
-            Handler(Looper.getMainLooper()).postDelayed({
-                Log.d(TAG, "🔥 Step 4: Primary screen off attempt")
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 4: Primary screen off")
-                ScreenOffActivity.startScreenOff(context)
-            }, 500)
-            
-            // 🔥 방식 5: 800ms 후 MainAcitivity 종료 신호
-            Handler(Looper.getMainLooper()).postDelayed({
-                Log.d(TAG, "🔥 Step 5: Send close signal to MainActivity")
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 5: MainActivity signal")
-                sendCloseSignalToMainActivity(context)
-            }, 800)
-            
-            // 🔥 방식 6: 1.5초 후 대안 화면 끄기 시도
-            Handler(Looper.getMainLooper()).postDelayed({
-                Log.d(TAG, "🔥 Step 6: Alternative screen off methods")
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 6: Alternative screen off")
-                alternativeScreenOffMethods(context)
-            }, 1500)
-            
-            // 🔥 방식 7: 2초 후 최종 안전장치
-            Handler(Looper.getMainLooper()).postDelayed({
-                Log.d(TAG, "🔥 Step 7: Final safety net - force everything")
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 7: Final safety net")
-                finalSafetyNet(context, targetApp)
-            }, 2000)
-            
-            // 🔥 방식 8: 3초 후 최종 상태 체크
-            Handler(Looper.getMainLooper()).postDelayed({
-                val isStillRunning = AppKiller.isAppRunning(context, targetApp)
-                Log.d(TAG, "🔥 Final check: Target app still running: $isStillRunning")
-                LogManager.getInstance().logAndSave(context, TAG, "🔥 Final check: App running: $isStillRunning")
+                Log.d(TAG, "🔥 3초 딜레이 후 화면 끄기 및 앱 종료 시작")
                 
-                if (isStillRunning) {
-                    Log.w(TAG, "🔥 WARNING: Target app still running after all attempts!")
-                    LogManager.getInstance().logAndSave(context, TAG, "🔥 WARNING: App still running!", "W")
-                    // 최종 긴급 시도
-                    AppKiller.killApp(context, targetApp)
+                // 사용자에게 종료 알림
+                showUserNotification(context, "🔄 앱 종료 중", "네비게이션 앱을 종료하고 화면을 끕니다.")
+                
+                // 🔥 방식 1: 강력한 앱 종료 시스템 사용
+                Log.d(TAG, "🔥 Step 1: Using AppKiller for comprehensive app termination")
+                LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 1: AppKiller start for: $targetApp")
+                
+                AppKiller.killApp(context, targetApp) { killResult ->
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 AppKiller result: $killResult for: $targetApp")
                 }
-            }, 3000)
+                
+                // 🔥 방식 2: 100ms 후 기존 방식도 병행
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.d(TAG, "🔥 Step 2: Backup force close attempt")
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 2: Backup force close")
+                    forceCloseTargetApp(context, targetApp)
+                    forceCloseTargetAppAlternative(context, targetApp)
+                }, 100)
+                
+                // 🔥 방식 3: 200ms 후 홈 화면 강제 이동
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.d(TAG, "🔥 Step 3: Force move to home screen")
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 3: Force to home")
+                    forceToHomeScreen(context)
+                }, 200)
+                
+                // 🔥 방식 4: 500ms 후 화면 끄기 시도 1차 (강화된 버전)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.d(TAG, "🔥 Step 4: Primary screen off attempt")
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 4: Primary screen off")
+                    ScreenOffActivity.startScreenOff(context)
+                    
+                    // 추가 화면 끄기 시도
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        Log.d(TAG, "🔥 Step 4.1: Additional screen off attempt")
+                        ScreenOffActivity.startScreenOff(context)
+                    }, 1000)
+                }, 500)
+                
+                // 🔥 방식 5: 800ms 후 MainAcitivity 종료 신호
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.d(TAG, "🔥 Step 5: Send close signal to MainActivity")
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 5: MainActivity signal")
+                    sendCloseSignalToMainActivity(context)
+                }, 800)
+                
+                // 🔥 방식 6: 1.5초 후 대안 화면 끄기 시도
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.d(TAG, "🔥 Step 6: Alternative screen off methods")
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 6: Alternative screen off")
+                    alternativeScreenOffMethods(context)
+                }, 1500)
+                
+                // 🔥 방식 7: 2초 후 최종 안전장치
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.d(TAG, "🔥 Step 7: Final safety net - force everything")
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 Step 7: Final safety net")
+                    finalSafetyNet(context, targetApp)
+                }, 2000)
+                
+                // 🔥 방식 8: 3초 후 최종 상태 체크
+                Handler(Looper.getMainLooper()).postDelayed({
+                    val isStillRunning = AppKiller.isAppRunning(context, targetApp)
+                    Log.d(TAG, "🔥 Final check: Target app still running: $isStillRunning")
+                    LogManager.getInstance().logAndSave(context, TAG, "🔥 Final check: App running: $isStillRunning")
+                    
+                    if (isStillRunning) {
+                        Log.w(TAG, "🔥 WARNING: Target app still running after all attempts!")
+                        LogManager.getInstance().logAndSave(context, TAG, "🔥 WARNING: App still running!", "W")
+                        // 최종 긴급 시도
+                        AppKiller.killApp(context, targetApp)
+                    }
+                }, 3000)
+                
+            }, 2000) // 2초 딜레이
             
         } catch (e: Exception) {
             Log.e(TAG, "🔥 Error handling power disconnected", e)
@@ -193,48 +297,9 @@ class PowerConnectionReceiver : BroadcastReceiver() {
         }
     }
     
-    private fun launchApp(context: Context, packageName: String) {
-        try {
-            val packageManager = context.packageManager
-            val intent = packageManager.getLaunchIntentForPackage(packageName)
-            
-            if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                context.startActivity(intent)
-                Log.d(TAG, "Successfully launched app: $packageName")
-            } else {
-                Log.w(TAG, "No launch intent found for package: $packageName")
-                // URL 스킴으로 시도
-                launchAppByUrlScheme(context, packageName)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error launching app: $packageName", e)
-        }
-    }
-    
-    private fun launchAppByUrlScheme(context: Context, packageName: String) {
-        try {
-            val urlScheme = when (packageName) {
-                "com.skt.tmap.ku" -> "tmap://"
-                "com.kakao.navi" -> "kakaonavi://"
-                "net.daum.android.map" -> "daummaps://"
-                "com.nhn.android.nmap" -> "nmap://"
-                "com.google.android.apps.maps" -> "googlemaps://"
-                "com.waze" -> "waze://"
-                else -> null
-            }
-            
-            if (urlScheme != null) {
-                val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(urlScheme))
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
-                Log.d(TAG, "Successfully launched app via URL scheme: $urlScheme")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error launching app via URL scheme", e)
-        }
-    }
+    // launchApp 메서드 제거 - StatusActivity만 사용
+    // private fun launchApp(context: Context, packageName: String) { ... }
+    // private fun launchAppByUrlScheme(context: Context, packageName: String) { ... }
     
     private fun forceCloseTargetApp(context: Context, packageName: String) {
         try {
@@ -291,9 +356,9 @@ class PowerConnectionReceiver : BroadcastReceiver() {
                 
                 Log.d(TAG, "Screen on - Battery: ${level * 100 / scale}%, Charging: $isCharging")
                 
-                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                val serviceEnabled = prefs.getBoolean(KEY_SERVICE_ENABLED, true)
-                val targetApp = prefs.getString(KEY_TARGET_APP, null)
+                val merged = PreferencesBridge.readValues(context)
+                val serviceEnabled = merged.serviceEnabled
+                val targetApp = merged.targetApp
                 
                 if (serviceEnabled && targetApp != null && isCharging) {
                     // 충전 중이면 앱 실행 체크
@@ -525,6 +590,84 @@ class PowerConnectionReceiver : BroadcastReceiver() {
             
         } catch (e: Exception) {
             Log.e(TAG, "🔥🔥🔥 EMERGENCY MODE ALSO FAILED! 🔥🔥🔥", e)
+        }
+    }
+    
+    private fun showUserNotification(context: Context, title: String, message: String) {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            
+            // 사용자 알림 채널 생성
+            val channelId = "user_notifications"
+            val channelName = "사용자 알림"
+            val channelDescription = "충전 연결/해제 시 사용자에게 표시되는 알림"
+            
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                val channel = android.app.NotificationChannel(
+                    channelId,
+                    channelName,
+                    android.app.NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = channelDescription
+                    setShowBadge(true)
+                    enableLights(true)
+                    enableVibration(true)
+                }
+                notificationManager.createNotificationChannel(channel)
+            }
+            
+            // 알림 생성
+            val notification = androidx.core.app.NotificationCompat.Builder(context, channelId)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setVisibility(androidx.core.app.NotificationCompat.VISIBILITY_PUBLIC)
+                .build()
+            
+            // 알림 표시 (고유 ID 사용)
+            val notificationId = System.currentTimeMillis().toInt()
+            notificationManager.notify(notificationId, notification)
+            
+            // 3초 후 자동으로 알림 제거
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                notificationManager.cancel(notificationId)
+            }, 3000)
+            
+            Log.d(TAG, "User notification shown: $title - $message")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing user notification", e)
+        }
+    }
+    
+    private fun checkPowerStatusImmediately(context: Context) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val serviceEnabled = prefs.getBoolean(KEY_SERVICE_ENABLED, true)
+            val targetApp = prefs.getString(KEY_TARGET_APP, null)
+            
+            if (serviceEnabled && targetApp != null) {
+                // 현재 충전 상태 확인
+                val batteryStatus = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                val status = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
+                val isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING || 
+                                status == android.os.BatteryManager.BATTERY_STATUS_FULL
+                
+                Log.d(TAG, "🔥 Immediate power status check - Charging: $isCharging, Target app: $targetApp")
+                
+                if (isCharging) {
+                    // 충전 중이면 즉시 앱 실행
+                    handlePowerConnected(context, targetApp)
+                } else {
+                    // 충전 해제 상태면 화면 끄기
+                    Log.d(TAG, "🔥 Power disconnected detected in immediate check")
+                    handlePowerDisconnected(context, targetApp)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in immediate power status check", e)
         }
     }
     

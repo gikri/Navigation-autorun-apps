@@ -6,6 +6,7 @@ import android.os.IBinder
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Notification
 import androidx.core.app.NotificationCompat
 import android.content.Context
 import android.os.Build
@@ -31,17 +32,33 @@ class AutoLaunchService : Service() {
         private const val WAKE_UP_CHANNEL_ID = "autolaunch_wakeup_channel"
         private const val NOTIFICATION_ID = 1001
         private const val WAKE_UP_NOTIFICATION_ID = 1002
-        private const val BATTERY_CHECK_INTERVAL = 15000L // MIUI 대응: 15초로 단축
-        private const val ALARM_BATTERY_CHECK_INTERVAL = 5000L // MIUI 대응: AlarmManager 5초
+        private const val BATTERY_CHECK_INTERVAL = 5000L // 백그라운드 감지를 위해 5초로 더 단축
+        private const val ALARM_BATTERY_CHECK_INTERVAL = 3000L // 백그라운드 감지를 위해 3초로 더 단축
         private const val JOB_ID = 1000
         private const val ALARM_REQUEST_CODE = 1001
         
         fun startService(context: Context) {
-            val intent = Intent(context, AutoLaunchService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                // 이미 실행 중인지 확인
+                val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val isRunning = manager.getRunningServices(Integer.MAX_VALUE).any { 
+                    it.service.className == AutoLaunchService::class.java.name 
+                }
+                
+                if (isRunning) {
+                    Log.d(TAG, "Service already running, skipping start request")
+                    return
+                }
+                
+                val intent = Intent(context, AutoLaunchService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                Log.d(TAG, "Service start requested successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error starting service", e)
             }
         }
         
@@ -61,6 +78,8 @@ class AutoLaunchService : Service() {
     private val batteryCheckHandler = Handler(Looper.getMainLooper())
     private var batteryReceiver: BroadcastReceiver? = null
     private var jobScheduler: JobScheduler? = null
+    private val notificationUpdateHandler = Handler(Looper.getMainLooper())
+    private var notificationUpdateRunnable: Runnable? = null
     
     override fun onCreate() {
         super.onCreate()
@@ -74,21 +93,59 @@ class AutoLaunchService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "AutoLaunchService started")
         
-        // Foreground 서비스 시작
-        startForeground(NOTIFICATION_ID, createNotification())
+        // 앱 활성화 상태 확인
+        val isServiceEnabled = getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean("service_enabled", false)
+        
+        if (!isServiceEnabled) {
+            Log.d(TAG, "Service is disabled, stopping service")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        
+        // Foreground 서비스 시작 (최소 권한 타입만 사용)
+        try {
+            startForeground(NOTIFICATION_ID, createNotification())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting foreground: ${e.message}")
+        }
+        
+        // 백그라운드 알림 강화 - 주기적으로 알림 업데이트
+        startNotificationUpdateHandler()
+        
+        // 이미 실행 중인지 확인
+        if (isServiceRunning()) {
+            Log.d(TAG, "Service already running, skipping duplicate start")
+            return START_STICKY
+        }
         
         // 서비스가 강제 종료되어도 다시 시작되도록 설정
         return START_STICKY
     }
     
+    private fun isServiceRunning(): Boolean {
+        val manager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        for (service in manager.getRunningServices(Integer.MAX_VALUE)) {
+            if (AutoLaunchService::class.java.name == service.service.className) {
+                return true
+            }
+        }
+        return false
+    }
+    
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Log.d(TAG, "Task removed - restarting service")
+        Log.d(TAG, "Task removed - checking if service restart is needed")
         
-        // 태스크가 제거되어도 서비스 재시작
-        val restartServiceIntent = Intent(applicationContext, AutoLaunchService::class.java)
-        restartServiceIntent.setPackage(packageName)
-        startService(restartServiceIntent)
+        // 서비스가 이미 실행 중이면 재시작하지 않음
+        if (!isServiceRunning()) {
+            Log.d(TAG, "Service not running, restarting service")
+            val restartServiceIntent = Intent(applicationContext, AutoLaunchService::class.java)
+            restartServiceIntent.setPackage(packageName)
+            startService(restartServiceIntent)
+        } else {
+            Log.d(TAG, "Service already running, skipping restart")
+        }
     }
     
     override fun onBind(intent: Intent?): IBinder? {
@@ -99,32 +156,47 @@ class AutoLaunchService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             
-            // 백그라운드 서비스 채널 (중간 우선순위로 변경)
+            // 기존 채널 삭제 (중복 방지)
+            notificationManager.deleteNotificationChannel(CHANNEL_ID)
+            notificationManager.deleteNotificationChannel(WAKE_UP_CHANNEL_ID)
+            
+            // 백그라운드 서비스 채널 (최소 우선순위로 설정)
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 "AutoLaunch 서비스",
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_MIN
             ).apply {
                 description = "AutoLaunch 백그라운드 서비스"
-                setShowBadge(true)
-                enableLights(true)
+                setShowBadge(false)
+                enableLights(false)
                 enableVibration(false)
+                setSound(null, null)
+                // 잠금화면에서도 표시되도록 설정
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                // 알림을 항상 표시
+                setAllowBubbles(false)
             }
             
-            // 화면 깨우기 채널 (고우선순위)
+            // 화면 깨우기 채널 (최고우선순위)
             val wakeUpChannel = NotificationChannel(
                 WAKE_UP_CHANNEL_ID,
                 "화면 깨우기",
-                NotificationManager.IMPORTANCE_HIGH
+                NotificationManager.IMPORTANCE_MAX
             ).apply {
                 description = "충전 연결 시 화면 깨우기"
                 setShowBadge(true)
                 enableLights(true)
                 enableVibration(true)
+                // 잠금화면에서도 표시되도록 설정
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                // 알림을 항상 표시
+                setAllowBubbles(true)
             }
             
             notificationManager.createNotificationChannel(serviceChannel)
             notificationManager.createNotificationChannel(wakeUpChannel)
+            
+            Log.d(TAG, "Notification channels created successfully")
         }
     }
     
@@ -136,25 +208,44 @@ class AutoLaunchService : Service() {
         )
         
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("🚗 AutoLaunch 실행 중")
+            .setContentTitle("🚗 AutoLaunch 백그라운드 실행 중")
             .setContentText("충전 연결 시 네비게이션 자동 실행 대기 중")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setOngoing(true)
-            .setAutoCancel(false)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setOngoing(false)
+            .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOnlyAlertOnce(true)
+            .setDefaults(0)
             .build()
     }
     
-    fun showWakeUpNotification(context: Context, targetApp: String) {
+        fun showWakeUpNotification(context: Context, targetApp: String) {
         try {
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             
-            // WakeUpActivity 실행 인텐트
-            val wakeUpIntent = Intent(context, WakeUpActivity::class.java)
-            wakeUpIntent.putExtra(WakeUpActivity.EXTRA_TARGET_APP, targetApp)
-            wakeUpIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // 이미 알림이 표시되고 있는지 확인
+            val activeNotifications = notificationManager.activeNotifications
+            val hasWakeUpNotification = activeNotifications.any { it.id == WAKE_UP_NOTIFICATION_ID }
+            
+            if (hasWakeUpNotification) {
+                Log.d(TAG, "Wake up notification already showing, skipping duplicate")
+                return
+            }
+            
+            // 기존 알림 제거
+            notificationManager.cancel(WAKE_UP_NOTIFICATION_ID)
+            // StatusActivity를 풀스크린 인텐트 대상으로 사용하여 잠금화면에서도 UI 표시
+            val wakeUpIntent = Intent(context, StatusActivity::class.java).apply {
+                putExtra(StatusActivity.EXTRA_STATUS_TYPE, "launch")
+                // UI 표시 후 즉시 실행되도록 2초 카운트다운 제공
+                putExtra(StatusActivity.EXTRA_TARGET_APP, targetApp)
+                putExtra(StatusActivity.EXTRA_DELAY_SECONDS, 5)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
             
             val pendingIntent = PendingIntent.getActivity(
                 context, 0, wakeUpIntent,
@@ -163,10 +254,10 @@ class AutoLaunchService : Service() {
             
             val notification = NotificationCompat.Builder(context, WAKE_UP_CHANNEL_ID)
                 .setContentTitle("충전 연결됨")
-                .setContentText("네비게이션 앱을 실행합니다")
+                .setContentText("네비게이션 실행 준비 중…")
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setContentIntent(pendingIntent)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setAutoCancel(true)
                 .setFullScreenIntent(pendingIntent, true)
@@ -174,12 +265,17 @@ class AutoLaunchService : Service() {
             
             notificationManager.notify(WAKE_UP_NOTIFICATION_ID, notification)
             
-            // 3초 후 알림 자동 제거
+            // 2초 후 알림 자동 제거 (딜레이 시간과 맞춤)
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                notificationManager.cancel(WAKE_UP_NOTIFICATION_ID)
-            }, 3000)
+                try {
+                    notificationManager.cancel(WAKE_UP_NOTIFICATION_ID)
+                    Log.d(TAG, "Wake up notification removed after 2 seconds")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error removing wake up notification", e)
+                }
+            }, 2000)
             
-            Log.d(TAG, "Wake up notification shown")
+            Log.d(TAG, "Wake up notification shown and will be removed in 2 seconds")
         } catch (e: Exception) {
             Log.e(TAG, "Error showing wake up notification", e)
         }
@@ -187,19 +283,20 @@ class AutoLaunchService : Service() {
     
     private fun setupBackgroundPersistence() {
         try {
-            Log.d(TAG, "Setting up enhanced background persistence for MIUI")
+            Log.d(TAG, "Setting up enhanced background persistence (MIUI-only)")
             
-            // 1. PARTIAL_WAKE_LOCK 획득 (Doze Mode 우회)
-            acquireWakeLock()
-            
-            // 2. 배터리 상태 모니터링 시작
+            // 1. 배터리 상태 모니터링만 기본으로 사용
             startBatteryMonitoring()
-            
-            // 3. MIUI 대응: AlarmManager로 강력한 백그라운드 체크
-            setupAlarmManager()
-            
-            // 4. JobScheduler로 백그라운드 작업 예약
-            scheduleBackgroundJob()
+
+            // 2. MIUI 단말에서만 강한 백그라운드 유지 기능 활성화
+            if (SystemUtils.isMiui()) {
+                acquireWakeLock()
+                setupAlarmManager()
+                scheduleBackgroundJob()
+                Log.d(TAG, "MIUI persistence features enabled")
+            } else {
+                Log.d(TAG, "Non-MIUI device: persistence features disabled")
+            }
             
             Log.d(TAG, "Enhanced background persistence setup completed for MIUI")
         } catch (e: Exception) {
@@ -271,10 +368,10 @@ class AutoLaunchService : Service() {
     }
     
     private fun startPeriodicBatteryCheck() {
-        val batteryCheckRunnable = object : Runnable {
+            val batteryCheckRunnable = object : Runnable {
             override fun run() {
                 try {
-                    // 주기적으로 배터리 상태를 확인하여 이벤트 놓침 방지
+                    // 주기적으로 배터리 상태를 확인하여 이벤트 놓침 방지 (MIUI에서만 자주)
                     val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
                     val batteryStatus = registerReceiver(null, intentFilter)
                     
@@ -287,12 +384,14 @@ class AutoLaunchService : Service() {
                         Log.d(TAG, "Periodic battery check - Level: ${level * 100 / scale}%, Charging: $isCharging")
                     }
                     
-                    // 다음 체크 예약
-                    batteryCheckHandler.postDelayed(this, BATTERY_CHECK_INTERVAL)
+                        // 다음 체크 예약 주기: MIUI는 짧게, 그 외는 길게(5분)
+                        val next = if (SystemUtils.isMiui()) BATTERY_CHECK_INTERVAL else 5 * 60 * 1000L
+                        batteryCheckHandler.postDelayed(this, next)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in periodic battery check", e)
                     // 오류가 발생해도 계속 체크
-                    batteryCheckHandler.postDelayed(this, BATTERY_CHECK_INTERVAL)
+                    val next = if (SystemUtils.isMiui()) BATTERY_CHECK_INTERVAL else 5 * 60 * 1000L
+                    batteryCheckHandler.postDelayed(this, next)
                 }
             }
         }
@@ -303,7 +402,7 @@ class AutoLaunchService : Service() {
     
     private fun setupAlarmManager() {
         try {
-            Log.d(TAG, "Setting up AlarmManager for MIUI bypass")
+            Log.d(TAG, "Setting up AlarmManager for MIUI bypass (MIUI-only)")
             val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
             
             // MIUI 백그라운드 제한 우회용 AlarmManager PendingIntent 생성
@@ -315,19 +414,20 @@ class AutoLaunchService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             
-            // 정확한 알람으로 MIUI 제한 우회 (10초마다)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    SystemClock.elapsedRealtime() + ALARM_BATTERY_CHECK_INTERVAL,
-                    pendingIntent
-                )
-            } else {
-                alarmManager.setExact(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    SystemClock.elapsedRealtime() + ALARM_BATTERY_CHECK_INTERVAL,
-                    pendingIntent
-                )
+            if (SystemUtils.isMiui()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        SystemClock.elapsedRealtime() + ALARM_BATTERY_CHECK_INTERVAL,
+                        pendingIntent
+                    )
+                } else {
+                    alarmManager.setExact(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        SystemClock.elapsedRealtime() + ALARM_BATTERY_CHECK_INTERVAL,
+                        pendingIntent
+                    )
+                }
             }
             
             Log.d(TAG, "MIUI bypass AlarmManager set up successfully")
@@ -344,7 +444,7 @@ class AutoLaunchService : Service() {
                 val jobInfo = JobInfo.Builder(JOB_ID, ComponentName(this, BackgroundJobService::class.java))
                     .setRequiredNetworkType(JobInfo.NETWORK_TYPE_NONE)
                     .setPersisted(true)
-                    .setPeriodic(5 * 60 * 1000L) // MIUI 대응: 5분으로 단축
+                    .setPeriodic(1 * 60 * 1000L) // 백그라운드 감지를 위해 1분으로 더 단축
                     .setRequiresCharging(false)
                     .setRequiresDeviceIdle(false)
                     .build()
@@ -359,19 +459,22 @@ class AutoLaunchService : Service() {
     
     private fun handlePowerEvent(context: Context, isConnected: Boolean) {
         try {
-            val prefs = context.getSharedPreferences("autolaunch_prefs", Context.MODE_PRIVATE)
-            val serviceEnabled = prefs.getBoolean("service_enabled", true)
-            val targetApp = prefs.getString("target_app", null)
+            val merged = PreferencesBridge.readValues(context)
+            val serviceEnabled = merged.serviceEnabled
+            val targetApp = merged.targetApp
+            if (!serviceEnabled) return
             
             if (serviceEnabled && targetApp != null) {
                 if (isConnected) {
-                    Log.d(TAG, "Handling power connection in service")
-                    // WakeUpActivity로 위임
-                    val intent = Intent(context, WakeUpActivity::class.java)
-                    intent.putExtra(WakeUpActivity.EXTRA_TARGET_APP, targetApp)
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    context.startActivity(intent)
+                    Log.d(TAG, "Handling power connection in service → 5초 후 풀스크린 알림으로 UI 표시")
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (LaunchGuard.canShow(context)) {
+                            LaunchGuard.markStart(context)
+                            showWakeUpNotification(context, targetApp)
+                        } else {
+                            Log.w(TAG, "Skip wakeup notification: cooldown or in progress")
+                        }
+                    }, 5000)
                 } else {
                     Log.d(TAG, "Handling power disconnection in service")
                     // ScreenOffActivity로 위임
@@ -383,6 +486,24 @@ class AutoLaunchService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error handling power event", e)
         }
+    }
+    
+    private fun startNotificationUpdateHandler() {
+        notificationUpdateRunnable = object : Runnable {
+            override fun run() {
+                try {
+                    // 알림 업데이트
+                    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    notificationManager.notify(NOTIFICATION_ID, createNotification())
+                    
+                    // 30초마다 알림 업데이트
+                    notificationUpdateHandler.postDelayed(this, 30000)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error updating notification", e)
+                }
+            }
+        }
+        notificationUpdateHandler.post(notificationUpdateRunnable!!)
     }
     
     override fun onDestroy() {
@@ -404,6 +525,7 @@ class AutoLaunchService : Service() {
             }
             
             batteryCheckHandler.removeCallbacksAndMessages(null)
+            notificationUpdateHandler.removeCallbacksAndMessages(null)
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 jobScheduler?.cancel(JOB_ID)

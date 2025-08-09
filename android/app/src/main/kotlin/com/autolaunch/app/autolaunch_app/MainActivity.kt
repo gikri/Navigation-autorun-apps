@@ -31,6 +31,13 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         
+        // TargetAppKillReceiver 등록 (중복 등록 방지)
+        try {
+            TargetAppKillReceiver.registerReceiver(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "TargetAppKillReceiver already registered or failed to register", e)
+        }
+        
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {
@@ -98,6 +105,29 @@ class MainActivity : FlutterActivity() {
                     // MIUI 설정 가이드 열기
                     val settingType = call.argument<String>("type") ?: "autostart"
                     openMIUISpecificSettings(settingType)
+                }
+                "startBackgroundService" -> {
+                    // 백그라운드 서비스 시작 (중복/권한 예외 안전 처리)
+                    try {
+                        startBackgroundService()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error starting background service", e)
+                    }
+                    result.success(true)
+                }
+                "stopBackgroundService" -> {
+                    // 백그라운드 서비스 중지
+                    stopBackgroundService()
+                    result.success(true)
+                }
+                "triggerLaunchIfCharging" -> {
+                    // 현재 충전 중이면 대기 UI → 5초 후 실행 트리거
+                    triggerLaunchIfCharging()
+                    result.success(true)
+                }
+                "requestNotificationPermission" -> {
+                    // 알림 권한 요청
+                    requestNotificationPermission()
                     result.success(true)
                 }
                 "checkMIUIPermissions" -> {
@@ -143,14 +173,10 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // 백그라운드 서비스 시작
-        AutoLaunchService.startService(this)
-        
         // 서비스 활성화 상태를 기본값으로 설정
+        // 초기화 시 자동 활성화되지 않도록 명시적으로 false 유지
         val prefs = getSharedPreferences("autolaunch_prefs", Context.MODE_PRIVATE)
-        if (!prefs.contains("service_enabled")) {
-            prefs.edit().putBoolean("service_enabled", true).apply()
-        }
+        prefs.edit().putBoolean("service_enabled", prefs.getBoolean("service_enabled", false)).apply()
         
         // 충전 해제 시 앱 종료 신호 처리
         handleCloseSignal()
@@ -220,6 +246,10 @@ class MainActivity : FlutterActivity() {
             permissions["accessibility_service"] = isAccessibilityServiceEnabled()
             Log.d(TAG, "Accessibility service status: ${permissions["accessibility_service"]}")
             
+            // 알림 권한 확인 (Android 13+)
+            permissions["notification_permission"] = isNotificationPermissionGranted()
+            Log.d(TAG, "Notification permission status: ${permissions["notification_permission"]}")
+            
             // 디바이스 관리자 권한 확인
             permissions["device_admin"] = isDeviceAdminActive()
             Log.d(TAG, "Device admin status: ${permissions["device_admin"]}")
@@ -231,6 +261,7 @@ class MainActivity : FlutterActivity() {
             permissions["system_alert_window"] = false
             permissions["write_settings"] = false
             permissions["accessibility_service"] = false
+            permissions["notification_permission"] = false
             permissions["device_admin"] = false
         }
         
@@ -281,6 +312,14 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun isNotificationPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+    
     private fun isSystemAlertWindowPermissionGranted(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Settings.canDrawOverlays(this)
@@ -1015,5 +1054,121 @@ class MainActivity : FlutterActivity() {
             Log.e(TAG, "Error reading log file", e)
             result.error("LOG_ERROR", "로그 파일 읽기 오류: ${e.message}", null)
         }
+    }
+    
+    private fun startBackgroundService() {
+        try {
+            Log.d(TAG, "🔥🔥🔥 Starting background service immediately 🔥🔥🔥")
+            
+            // 서비스 활성화 상태 저장
+            getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("service_enabled", true)
+                .apply()
+            
+            // 즉시 백그라운드 서비스 시작
+            AutoLaunchService.startService(this)
+            
+            // 추가로 1초 후에도 재시도 (서비스 시작 보장)
+            Handler(Looper.getMainLooper()).postDelayed({
+                Log.d(TAG, "🔥 Retry starting background service")
+                AutoLaunchService.startService(this)
+            }, 1000)
+            
+            Toast.makeText(this, "백그라운드 서비스가 시작되었습니다", Toast.LENGTH_SHORT).show()
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting background service", e)
+            Toast.makeText(this, "백그라운드 서비스 시작 실패", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    private fun stopBackgroundService() {
+        try {
+            Log.d(TAG, "🔥🔥🔥 Stopping background service 🔥🔥🔥")
+            
+            // 서비스 비활성화 상태 저장
+            getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("service_enabled", false)
+                .apply()
+            
+            // 백그라운드 서비스 중지
+            AutoLaunchService.stopService(this)
+            
+            Toast.makeText(this, "백그라운드 서비스가 중지되었습니다", Toast.LENGTH_SHORT).show()
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping background service", e)
+            Toast.makeText(this, "백그라운드 서비스 중지 실패", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun triggerLaunchIfCharging() {
+        try {
+            val batteryStatus = registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+            val status = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING || status == android.os.BatteryManager.BATTERY_STATUS_FULL
+
+            val merged = PreferencesBridge.readValues(this)
+            val serviceEnabled = merged.serviceEnabled
+            val targetApp = merged.targetApp
+
+            if (serviceEnabled && targetApp != null && isCharging) {
+                // 즉시 대기 UI 5초 표시 후 실행 트리거
+                val intent = android.content.Intent(this, StatusActivity::class.java).apply {
+                    putExtra(StatusActivity.EXTRA_STATUS_TYPE, "launch")
+                    putExtra(StatusActivity.EXTRA_TARGET_APP, targetApp)
+                    putExtra(StatusActivity.EXTRA_DELAY_SECONDS, 5)
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }
+                startActivity(intent)
+                try { AutoLaunchService.showWakeUpNotification(this, targetApp) } catch (_: Exception) {}
+            }
+        } catch (_: Exception) { }
+    }
+    
+    private fun requestNotificationPermission() {
+        try {
+            Log.d(TAG, "Requesting notification permission")
+            
+            // Android 13 이상에서는 알림 권한을 명시적으로 요청
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+                    Toast.makeText(this, "알림 권한을 허용해주세요", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, "알림 권한이 이미 허용되어 있습니다", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                // Android 12 이하에서는 알림 채널 설정으로 충분
+                Toast.makeText(this, "알림 설정을 확인해주세요", Toast.LENGTH_SHORT).show()
+            }
+            
+            // 알림 설정 화면으로 이동
+            val intent = Intent().apply {
+                action = Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            }
+            startActivity(intent)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error requesting notification permission", e)
+            Toast.makeText(this, "알림 권한 요청 실패", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        
+        // TargetAppKillReceiver 해제
+        try {
+            TargetAppKillReceiver.unregisterReceiver(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "TargetAppKillReceiver not registered or already unregistered", e)
+        }
+        
+        Log.d(TAG, "MainActivity destroyed")
     }
 }

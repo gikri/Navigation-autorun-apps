@@ -15,7 +15,7 @@ class MIUIBatteryCheckReceiver : BroadcastReceiver() {
     
     companion object {
         private const val TAG = "MIUIBatteryCheckReceiver"
-        private const val ALARM_BATTERY_CHECK_INTERVAL = 5000L // MIUI 대응: 5초로 더 단축
+        private const val ALARM_BATTERY_CHECK_INTERVAL = 3000L // 백그라운드 감지를 위해 3초로 더 단축
         private const val ALARM_REQUEST_CODE = 1001
         private const val PREFS_NAME = "autolaunch_prefs"
         private const val KEY_SERVICE_ENABLED = "service_enabled"
@@ -74,9 +74,13 @@ class MIUIBatteryCheckReceiver : BroadcastReceiver() {
                 } else if (serviceEnabled && targetApp != null) {
                     // 충전 상태 변화가 없어도 현재 상태에 따라 처리
                     if (isCharging) {
-                        // 🔥 MIUI 대응: 충전 중이면 매번 앱 실행 확인 및 시도
+                        // 🔥 백그라운드 감지 강화: 충전 중이면 매번 앱 실행 확인 및 시도
                         Log.d(TAG, "🔥 MIUI: Aggressively ensuring app is running while charging")
                         handlePowerConnected(context, targetApp)
+                    } else {
+                        // 🔥 충전 해제 상태도 지속적으로 확인
+                        Log.d(TAG, "🔥 MIUI: Checking if app should be closed (not charging)")
+                        handlePowerDisconnected(context, targetApp)
                     }
                 }
             }
@@ -89,15 +93,14 @@ class MIUIBatteryCheckReceiver : BroadcastReceiver() {
         try {
             Log.d(TAG, "MIUI: Handling power connection")
             
-            // WakeUpActivity로 화면 깨우기 및 앱 실행
-            val intent = Intent(context, WakeUpActivity::class.java)
-            intent.putExtra(WakeUpActivity.EXTRA_TARGET_APP, targetApp)
+            // StatusActivity로 화면 깨우기 및 앱 실행 (3초 딜레이 포함)
+            val intent = Intent(context, StatusActivity::class.java)
+            intent.putExtra(StatusActivity.EXTRA_STATUS_TYPE, "launch")
+            intent.putExtra(StatusActivity.EXTRA_TARGET_APP, targetApp)
+            intent.putExtra(StatusActivity.EXTRA_DELAY_SECONDS, 3)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             context.startActivity(intent)
-            
-            // 고우선순위 알림도 표시
-            AutoLaunchService.showWakeUpNotification(context, targetApp)
             
             Log.d(TAG, "MIUI: Power connection handled successfully")
         } catch (e: Exception) {

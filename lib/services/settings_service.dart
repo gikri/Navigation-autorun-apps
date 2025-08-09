@@ -3,21 +3,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class SettingsService extends ChangeNotifier {
   static const String _keyTargetApp = 'target_app';
-  static const String _keyDelayTime = 'delay_time';
-  static const String _keyBluetoothException = 'bluetooth_exception';
-  static const String _keyBatteryOptimization = 'battery_optimization';
   static const String _keyServiceEnabled = 'service_enabled';
 
   String? _targetApp;
-  int _delayTime = 2;
-  bool _bluetoothException = false;
-  bool _batteryOptimization = false;
   bool _serviceEnabled = false;
 
   String? get targetApp => _targetApp;
-  int get delayTime => _delayTime;
-  bool get bluetoothException => _bluetoothException;
-  bool get batteryOptimization => _batteryOptimization;
   bool get serviceEnabled => _serviceEnabled;
 
   Future<void> initialize() async {
@@ -25,9 +16,6 @@ class SettingsService extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
 
       _targetApp = prefs.getString(_keyTargetApp);
-      _delayTime = prefs.getInt(_keyDelayTime) ?? 2;
-      _bluetoothException = prefs.getBool(_keyBluetoothException) ?? false;
-      _batteryOptimization = prefs.getBool(_keyBatteryOptimization) ?? false;
       _serviceEnabled = prefs.getBool(_keyServiceEnabled) ?? false;
 
       notifyListeners();
@@ -48,23 +36,7 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setDelayTime(int seconds) async {
-    _delayTime = seconds;
-    await _saveInt(_keyDelayTime, seconds);
-    notifyListeners();
-  }
 
-  Future<void> setBluetoothException(bool enabled) async {
-    _bluetoothException = enabled;
-    await _saveBool(_keyBluetoothException, enabled);
-    notifyListeners();
-  }
-
-  Future<void> setBatteryOptimization(bool enabled) async {
-    _batteryOptimization = enabled;
-    await _saveBool(_keyBatteryOptimization, enabled);
-    notifyListeners();
-  }
 
   Future<void> setServiceEnabled(bool enabled) async {
     _serviceEnabled = enabled;

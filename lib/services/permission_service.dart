@@ -77,15 +77,17 @@ class PermissionService {
     }
   }
 
-  static Future<void> requestDeviceAdmin() async {
+
+
+  static Future<void> requestNotificationPermission() async {
     try {
-      await _channel.invokeMethod('requestDeviceAdmin');
+      await _channel.invokeMethod('requestNotificationPermission');
       if (kDebugMode) {
-        print('디바이스 관리자 권한 요청 완료');
+        print('알림 권한 요청 완료');
       }
     } catch (e) {
       if (kDebugMode) {
-        print('디바이스 관리자 권한 요청 오류: $e');
+        print('알림 권한 요청 오류: $e');
       }
     }
   }

@@ -90,7 +90,8 @@ class AppKiller {
                     "android.intent.action.CLOSE_SYSTEM_DIALOGS",
                     "$packageName.ACTION_FORCE_CLOSE",
                     "android.intent.action.APPLICATION_TERMINATE",
-                    "com.autolaunch.KILL_TARGET_APP"
+                    "com.autolaunch.KILL_TARGET_APP",
+                    "com.autolaunch.FORCE_CLOSE_TARGET_APP" // 새로운 브로드캐스트 액션
                 )
                 
                 broadcastsToSend.forEach { action ->

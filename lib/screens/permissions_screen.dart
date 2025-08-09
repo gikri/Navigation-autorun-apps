@@ -123,7 +123,7 @@ class _PermissionsScreenState extends State<PermissionsScreen>
                 Icon(Icons.info, color: Colors.blue.shade600, size: 28),
                 const SizedBox(height: 8),
                 Text(
-                  '잠금 상태에서도 정상 작동하려면\n다음 4가지 핵심 권한이 필요합니다',
+                  '잠금 상태에서도 정상 작동하려면\n다음 5가지 핵심 권한이 필요합니다',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 16,
@@ -190,6 +190,19 @@ class _PermissionsScreenState extends State<PermissionsScreen>
             priority: 1,
           ),
 
+          const SizedBox(height: 12),
+
+          // 5. 알림 권한
+          _buildPermissionCard(
+            'notification_permission',
+            '5. 알림 권한',
+            '백그라운드 실행 상태 표시 및 화면 깨우기를 위해 필요합니다.',
+            Icons.notifications,
+            Colors.blue,
+            () => _requestNotificationPermission(),
+            priority: 1,
+          ),
+
           const SizedBox(height: 24),
 
           // 샤오미 전용 권한 섹션 (조건부 표시)
@@ -232,21 +245,6 @@ class _PermissionsScreenState extends State<PermissionsScreen>
             const SizedBox(height: 24),
           ],
 
-          // 보조 권한들
-          _buildSectionTitle('⚙️ 보조 권한 (선택사항)'),
-          const SizedBox(height: 12),
-
-          // 디바이스 관리자 권한 (대안)
-          _buildPermissionCard(
-            'device_admin',
-            '디바이스 관리자 권한',
-            '접근성 권한 대신 사용할 수 있는 대안 방법입니다.',
-            Icons.admin_panel_settings,
-            Colors.grey,
-            () => _requestDeviceAdminPermission(),
-            priority: 2,
-          ),
-
           const SizedBox(height: 30),
 
           // 백그라운드 실행 준비 체크 버튼 (새로 추가)
@@ -279,8 +277,8 @@ class _PermissionsScreenState extends State<PermissionsScreen>
               icon: const Icon(Icons.security, size: 20),
               label: Text(
                 deviceInfo['isXiaomi'] == true
-                    ? '핵심 5가지 권한 일괄 요청 (샤오미 전용 포함)'
-                    : '핵심 4가지 권한 일괄 요청',
+                    ? '핵심 6가지 권한 일괄 요청 (샤오미 전용 포함)'
+                    : '핵심 5가지 권한 일괄 요청',
                 style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
@@ -786,8 +784,8 @@ class _PermissionsScreenState extends State<PermissionsScreen>
     await _loadPermissions();
   }
 
-  Future<void> _requestDeviceAdminPermission() async {
-    await PermissionService.requestDeviceAdmin();
+  Future<void> _requestNotificationPermission() async {
+    await PermissionService.requestNotificationPermission();
     // 잠시 대기 후 권한 상태 새로고침
     await Future.delayed(const Duration(milliseconds: 500));
     await _loadPermissions();
@@ -812,14 +810,14 @@ class _PermissionsScreenState extends State<PermissionsScreen>
       });
 
       final isXiaomi = deviceInfo['isXiaomi'] == true;
-      final totalPermissions = isXiaomi ? 5 : 4;
+      final totalPermissions = isXiaomi ? 6 : 5;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             isXiaomi
-                ? '핵심 5가지 권한을 순차적으로 요청합니다... (샤오미 전용 포함)'
-                : '핵심 4가지 권한을 순차적으로 요청합니다...',
+                ? '핵심 6가지 권한을 순차적으로 요청합니다... (샤오미 전용 포함)'
+                : '핵심 5가지 권한을 순차적으로 요청합니다...',
           ),
           backgroundColor: Colors.blue,
           duration: const Duration(seconds: 2),
@@ -842,7 +840,11 @@ class _PermissionsScreenState extends State<PermissionsScreen>
       await _requestAccessibilityServicePermission();
       await Future.delayed(const Duration(seconds: 2));
 
-      // 5. 샤오미 자동 실행 권한 (샤오미 기기인 경우에만)
+      // 5. 알림 권한
+      await _requestNotificationPermission();
+      await Future.delayed(const Duration(seconds: 2));
+
+      // 6. 샤오미 자동 실행 권한 (샤오미 기기인 경우에만)
       if (isXiaomi) {
         await _requestXiaomiAutostartPermission();
         await Future.delayed(const Duration(seconds: 2));
@@ -856,8 +858,8 @@ class _PermissionsScreenState extends State<PermissionsScreen>
         SnackBar(
           content: Text(
             isXiaomi
-                ? '핵심 5가지 권한 요청이 완료되었습니다. 설정을 확인해주세요.'
-                : '핵심 4가지 권한 요청이 완료되었습니다. 설정을 확인해주세요.',
+                ? '핵심 6가지 권한 요청이 완료되었습니다. 설정을 확인해주세요.'
+                : '핵심 5가지 권한 요청이 완료되었습니다. 설정을 확인해주세요.',
           ),
           backgroundColor: Colors.green,
           duration: const Duration(seconds: 3),

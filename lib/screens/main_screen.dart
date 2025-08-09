@@ -108,10 +108,12 @@ class _MainScreenState extends State<MainScreen> {
 
                             // 제어 버튼들
                             ControlButtons(
-                              onActivateService:
-                                  () => controller.setServiceEnabled(true),
-                              onDeactivateService:
-                                  () => controller.setServiceEnabled(false),
+                              onActivateService: () async {
+                                await controller.setServiceEnabled(true);
+                              },
+                              onDeactivateService: () async {
+                                await controller.setServiceEnabled(false);
+                              },
                               hasTargetApp: controller.targetApp != null,
                               isServiceActive: controller.isServiceActive,
                               isSmallScreen: isSmallScreen,
